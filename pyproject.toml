@@ -5,10 +5,16 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "asyncio-tools>=0.1.2",
     "dotenv-python>=0.0.1",
     "langchain>=0.3.27",
     "langchain-google-genai>=2.1.10",
     "langchain-google-vertexai>=2.0.28",
     "langgraph>=0.6.6",
+    "pydantic>=2.0.0",
     "python-dotenv>=1.1.1",
+    "requests>=2.31.0",
+    "sentence-transformers>=2.2.2",
+    "urllib3>=2.0.0",
+    "weaviate-client>=4.0.0",
 ]
