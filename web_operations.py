@@ -71,56 +71,73 @@ def _trigger_and_download_snapshot(trigger_url,params,data,operation_name="opera
 
 
 def reddit_search_api(keyword, date="All time", sort_by="Hot", num_of_posts=75):
+    """
+    Finds relevant Reddit posts AND retrieves comments for the top results.
+    """
+    # --- STEP 1: Find relevant posts (existing logic) ---
     trigger_url = "https://api.brightdata.com/datasets/v3/trigger"
-
     params = {
-        "dataset_id": "gd_lvz8ah06191smkebj4",
+        "dataset_id": "gd_lvz8ah06191smkebj4", # Dataset for post searching
         "include_errors": "true",
         "type": "discover_new",
         "discover_by": "keyword"
     }
+    data = [{"keyword": keyword, "date": date, "sort_by": sort_by, "num_of_posts": num_of_posts}]
 
-    data = [
-        {
-            "keyword": keyword,
-            "date": date,
-            "sort_by": sort_by,
-            "num_of_posts": num_of_posts,
-        }
-    ]
+    raw_post_data = _trigger_and_download_snapshot(trigger_url, params, data, operation_name="reddit search")
+    if not raw_post_data:
+        return {"parsed_posts": [], "total_found": 0, "comments_retrieved": 0}
 
-    raw_data = _trigger_and_download_snapshot(trigger_url, params, data, operation_name="reddit")
-
-    if not raw_data:
-        return None
-
-    parsed_data = []
-    for item in raw_data:
-        post = None # Initialize post dictionary
+    parsed_posts = []
+    for item in raw_post_data:
+        post = None
         try:
-            # --- THIS IS THE NEW LOGIC ---
-            if isinstance(item, str):
-                # If the item is a string, parse it
-                post = json.loads(item)
-            elif isinstance(item, dict):
-                # If it's already a dictionary, use it directly
-                post = item
-            
+            post = json.loads(item) if isinstance(item, str) else item
             if post:
-                # Now that we know 'post' is a dictionary, we can safely process it
-                parsed_post = {
-                    "title": post.get("title"),
-                    "url": post.get("url")
-                }
-                parsed_data.append(parsed_post)
-            else:
-                print(f"Skipping an item of unknown type: {type(item)}")
-
+                parsed_posts.append({"title": post.get("title"), "url": post.get("url")})
         except json.JSONDecodeError:
             print(f"Skipping an item that was not valid JSON: {item}")
             continue
+    
+    if not parsed_posts:
+        return {"parsed_posts": [], "total_found": 0, "comments_retrieved": 0}
 
-    return {"parsed_posts": parsed_data, "total_found": len(parsed_data)}
+    # --- STEP 2: Extract URLs and retrieve comments for top posts (NEW LOGIC) ---
+    # To manage cost and time, let's only get comments for the top 5 posts.
+    top_post_urls = [post["url"] for post in parsed_posts[:5] if post.get("url")]
+    
+    print(f"Found {len(parsed_posts)} posts. Retrieving comments for top {len(top_post_urls)}...")
+    
+    # Call the existing comment retrieval function
+    comment_data = reddit_post_retrieval(urls=top_post_urls, comment_limit=20) # Limit to 20 comments per post
+    
+    # --- STEP 3: Combine posts and their comments (NEW LOGIC) ---
+    final_results = []
+    if comment_data and comment_data.get("comments"):
+        # Create a dictionary to map comments to their parent post URL for easy lookup
+        comments_by_url = {}
+        for comment in comment_data["comments"]:
+            # This assumes your comment data includes the source post URL. 
+            # If not, the structure needs adjustment, but this is a common pattern.
+            post_url = comment.get("post_url") # You might need to add 'post_url' to your comment scraper
+            if post_url not in comments_by_url:
+                comments_by_url[post_url] = []
+            comments_by_url[post_url].append(comment['content'])
+
+        # Merge posts with their comments
+        for post in parsed_posts:
+            post_url = post.get("url")
+            post['comments'] = comments_by_url.get(post_url, []) # Add comments list to each post object
+            final_results.append(post)
+    else:
+        # If no comments are found, just return the posts
+        final_results = parsed_posts
+
+    return {
+        "results": final_results,
+        "total_posts_found": len(parsed_posts),
+        "total_comments_retrieved": len(comment_data.get("comments", [])) if comment_data else 0
+    }
 
 def reddit_post_retrieval(urls,days_back=10,load_all_replies=False,comment_limit=""):
     if not urls:
