@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Environments
+.env
+**/.env
+.venv
+**/venv/
+venv/
+env/
+
+# Project specific
+jarvis/data/
+data/cache/
+debug_fetch.py
+test_report.md
+
+# Logs and databases
+*.log
+*.sqlite3
+jarvis/data/jarvis.db
+
+# Other
+.pytest_cache/
+.mypy_cache/

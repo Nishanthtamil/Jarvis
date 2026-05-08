@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jarvis Research Agent</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f0f11;
+      --surface: #18181b;
+      --border: #27272a;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --accent: #6d28d9;
+      --accent-light: #8b5cf6;
+      --success: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --radius: 10px;
+      --font: 'Inter', system-ui, sans-serif;
+    }
+    body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; display: flex; flex-direction: column; }
+    header { padding: 1.2rem 2rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: -0.02em; }
+    header .badge { font-size: 0.7rem; background: var(--accent); color: #fff; padding: 2px 8px; border-radius: 999px; }
+    main { flex: 1; display: grid; grid-template-columns: 1fr 2fr; gap: 0; max-height: calc(100vh - 56px); }
+
+    /* Left: input + progress */
+    .left-panel { border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+    .input-area { padding: 1.5rem; border-bottom: 1px solid var(--border); }
+    .input-area label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+    textarea {
+      width: 100%; background: var(--surface); border: 1px solid var(--border);
+      color: var(--text); border-radius: var(--radius); padding: 0.8rem 1rem;
+      font-size: 0.95rem; font-family: var(--font); resize: none; min-height: 100px;
+      transition: border-color 0.2s;
+    }
+    textarea:focus { outline: none; border-color: var(--accent-light); }
+    button#research-btn {
+      margin-top: 10px; width: 100%; padding: 0.75rem; background: var(--accent);
+      color: #fff; border: none; border-radius: var(--radius); font-size: 0.95rem;
+      font-weight: 600; cursor: pointer; transition: background 0.2s;
+    }
+    button#research-btn:hover { background: var(--accent-light); }
+    button#research-btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+
+    .progress-panel { flex: 1; overflow-y: auto; padding: 1rem 1.5rem; }
+    .progress-panel h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 1rem; }
+    .log-entry { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; font-size: 0.82rem; }
+    .log-icon { width: 16px; height: 16px; flex-shrink: 0; margin-top: 1px; }
+    .log-text { color: var(--muted); line-height: 1.5; word-break: break-word; }
+    .log-entry.type-status .log-icon { color: var(--accent-light); }
+    .log-entry.type-search .log-icon { color: var(--warn); }
+    .log-entry.type-fetch .log-icon { color: var(--success); }
+    .log-entry.type-fetch.fail .log-icon { color: var(--danger); }
+    .log-entry.type-summary .log-icon { color: #38bdf8; }
+    .log-entry.type-gap .log-icon { color: var(--warn); }
+    .log-entry.type-error .log-icon { color: var(--danger); }
+    .log-entry.type-error .log-text { color: var(--danger); }
+
+    /* Right: answer */
+    .right-panel { display: flex; flex-direction: column; overflow: hidden; }
+    .answer-header { padding: 1.2rem 2rem; border-bottom: 1px solid var(--border); font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    .answer-body { flex: 1; overflow-y: auto; padding: 2rem; }
+    #answer-content { font-size: 0.97rem; line-height: 1.9; white-space: pre-wrap; word-break: break-word; }
+    #answer-content .cursor { display: inline-block; width: 2px; height: 1.1em; background: var(--accent-light); animation: blink 0.8s infinite; vertical-align: text-bottom; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    #citations { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+    #citations h3 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 0.8rem; }
+    .citation-item { display: flex; gap: 8px; margin-bottom: 6px; font-size: 0.82rem; }
+    .citation-num { color: var(--accent-light); font-weight: 600; min-width: 24px; }
+    .citation-link { color: var(--muted); text-decoration: none; word-break: break-all; }
+    .citation-link:hover { color: var(--text); }
+    .stat-bar { padding: 0.6rem 2rem; border-top: 1px solid var(--border); font-size: 0.78rem; color: var(--muted); display: flex; gap: 2rem; }
+
+    /* History sidebar (collapsible) */
+    #history-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; font-size: 0.78rem; cursor: pointer; margin-left: auto; }
+    #history-btn:hover { color: var(--text); border-color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+    <h1>Jarvis Research Agent</h1>
+    <span class="badge">local · open-source</span>
+    <button id="history-btn" onclick="loadHistory()">History</button>
+  </header>
+
+  <main>
+    <div class="left-panel">
+      <div class="input-area">
+        <label for="goal-input">Research goal</label>
+        <textarea id="goal-input" placeholder="What do you want to research? Be specific." rows="4"></textarea>
+        <button id="research-btn" onclick="startResearch()">Run Research</button>
+      </div>
+      <div class="progress-panel">
+        <h2>Progress</h2>
+        <div id="log"></div>
+      </div>
+    </div>
+
+    <div class="right-panel">
+      <div class="answer-header">Answer</div>
+      <div class="answer-body">
+        <div id="answer-content"><span style="color:var(--muted)">Your research answer will appear here…</span></div>
+        <div id="citations"></div>
+      </div>
+      <div class="stat-bar">
+        <span id="stat-sources">Sources: —</span>
+        <span id="stat-iters">Iterations: —</span>
+        <span id="stat-time">Time: —</span>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const ICONS = {
+      status: `<svg class="log-icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="3"/></svg>`,
+      search: `<svg class="log-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="7" cy="7" r="4"/><path d="m12 12-2.5-2.5"/></svg>`,
+      fetch: `<svg class="log-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8h10M9 4l4 4-4 4"/></svg>`,
+      summary: `<svg class="log-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M5 7h6M5 10h4"/></svg>`,
+      gap: `<svg class="log-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 4v4M8 11v1"/><circle cx="8" cy="8" r="6"/></svg>`,
+      error: `<svg class="log-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5v4M8 11v1"/><path d="M3 13h10L8 3 3 13z"/></svg>`,
+    };
+
+    let startTime = null;
+    let answerText = "";
+
+    function addLog(type, text, fail = false) {
+      const log = document.getElementById("log");
+      const entry = document.createElement("div");
+      entry.className = `log-entry type-${type}${fail ? " fail" : ""}`;
+      entry.innerHTML = `${ICONS[type] || ICONS.status}<span class="log-text">${escHtml(text)}</span>`;
+      log.appendChild(entry);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function escHtml(str) {
+      return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    function resetUI() {
+      document.getElementById("log").innerHTML = "";
+      document.getElementById("answer-content").innerHTML = '<span class="cursor"></span>';
+      document.getElementById("citations").innerHTML = "";
+      document.getElementById("stat-sources").textContent = "Sources: —";
+      document.getElementById("stat-iters").textContent = "Iterations: —";
+      document.getElementById("stat-time").textContent = "Time: —";
+      answerText = "";
+    }
+
+    function appendAnswer(chunk) {
+      answerText += chunk;
+      const el = document.getElementById("answer-content");
+      el.innerHTML = escHtml(answerText) + '<span class="cursor"></span>';
+      el.parentElement.scrollTop = el.parentElement.scrollHeight;
+    }
+
+    function finalizeAnswer(citations) {
+      const el = document.getElementById("answer-content");
+      el.innerHTML = escHtml(answerText);
+
+      if (citations && citations.length > 0) {
+        const cEl = document.getElementById("citations");
+        cEl.innerHTML = `<h3>Sources</h3>` + citations.map(c =>
+          `<div class="citation-item"><span class="citation-num">[${c.index}]</span><a class="citation-link" href="${escHtml(c.url)}" target="_blank" rel="noopener">${escHtml(c.title || c.url)}</a></div>`
+        ).join("");
+        document.getElementById("stat-sources").textContent = `Sources: ${citations.length}`;
+      }
+    }
+
+    async function startResearch() {
+      const goal = document.getElementById("goal-input").value.trim();
+      if (!goal) return;
+
+      resetUI();
+      startTime = Date.now();
+      const btn = document.getElementById("research-btn");
+      btn.disabled = true;
+      btn.textContent = "Researching…";
+
+      try {
+        const resp = await fetch("/research", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ goal }),
+        });
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            let event;
+            try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+            if (event.type === "status") addLog("status", event.message);
+            else if (event.type === "search") addLog("search", `Searched: "${event.query}" → ${event.count} results`);
+            else if (event.type === "fetch") addLog("fetch", event.url.slice(0, 60) + "…", !event.ok);
+            else if (event.type === "summary") addLog("summary", `Extracted: ${event.text}`);
+            else if (event.type === "gap") addLog("gap", `Gaps: ${event.gaps.join("; ")}`);
+            else if (event.type === "error") addLog("error", event.message);
+            else if (event.type === "answer_chunk") appendAnswer(event.text);
+            else if (event.type === "done") {
+              finalizeAnswer(event.citations);
+              document.getElementById("stat-iters").textContent = `Iterations: ${event.iterations}`;
+              document.getElementById("stat-time").textContent = `Time: ${((Date.now() - startTime) / 1000).toFixed(1)}s`;
+            }
+          }
+        }
+      } catch (err) {
+        addLog("error", `Connection error: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Run Research";
+      }
+    }
+
+    async function loadHistory() {
+      const resp = await fetch("/history");
+      const data = await resp.json();
+      const goals = data.sessions.map(s => `[${new Date(s.created_at * 1000).toLocaleString()}] ${s.goal.slice(0, 80)}`).join("\n");
+      alert(goals || "No history yet.");
+    }
+
+    // Allow Ctrl+Enter to submit
+    document.getElementById("goal-input").addEventListener("keydown", e => {
+      if (e.key === "Enter" && e.ctrlKey) startResearch();
+    });
+  </script>
+</body>
+</html>

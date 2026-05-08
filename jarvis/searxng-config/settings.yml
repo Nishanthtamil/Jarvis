@@ -1,0 +1,24 @@
+use_default_settings: true
+server:
+  secret_key: "change-this-to-a-random-string-at-least-32-chars"
+  limiter: false
+  image_proxy: false
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+engines:
+  - name: google
+    engine: google
+    use_mobile_ui: false
+  - name: bing
+    engine: bing
+  - name: duckduckgo
+    engine: duckduckgo
+  - name: wikipedia
+    engine: wikipedia
+ui:
+  static_use_hash: true
