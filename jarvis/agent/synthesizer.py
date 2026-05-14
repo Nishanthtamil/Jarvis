@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import AsyncGenerator
 
-from llm.client import get_client, LLMMessage, truncate_to_tokens
+from llm.client import get_client, LLMMessage, truncate_to_tokens, ModelTier
 from agent.memory import SessionMemory
 
 MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "6000"))
@@ -37,7 +37,6 @@ async def extract_from_source(goal: str, markdown: str, url: str) -> str:
     This is the per-source step; keeps prompts small.
     """
     client = get_client()
-    # Truncate to be safe within the model's context
     safe_markdown = truncate_to_tokens(markdown, 1200)
 
     messages = [
@@ -47,14 +46,13 @@ async def extract_from_source(goal: str, markdown: str, url: str) -> str:
             content=f"Research question: {goal}\n\nSource URL: {url}\n\nDocument:\n{safe_markdown}",
         ),
     ]
-    result = await client.complete(messages, max_tokens=300, temperature=0.0)
+    result = await client.complete(messages, tier=ModelTier.FAST, max_tokens=300, temperature=0.0)
     return result.strip()
 
 
 async def check_gaps(goal: str, memory: SessionMemory) -> list[str]:
     """
     Ask the model what is still unanswered given the collected summaries.
-    Returns a list of gap descriptions (empty list if fully answered).
     """
     client = get_client()
     combined = truncate_to_tokens(memory.combined_summary_text(), 3000)
@@ -63,8 +61,7 @@ async def check_gaps(goal: str, memory: SessionMemory) -> list[str]:
             role="system",
             content="""You are a research quality checker.
 Given a research goal and collected evidence so far, identify what is still unanswered or unclear.
-Return JSON: {"gaps": ["gap 1", "gap 2"]} or {"gaps": []} if fully answered.
-List at most 2 gaps. Be specific.""",
+Return JSON: {"gaps": ["gap 1", "gap 2"]} or {"gaps": []} if fully answered.""",
         ),
         LLMMessage(
             role="user",
@@ -72,7 +69,7 @@ List at most 2 gaps. Be specific.""",
         ),
     ]
     try:
-        data = await client.complete_json(messages, max_tokens=200)
+        data = await client.complete_json(messages, tier=ModelTier.FAST, max_tokens=200)
         return data.get("gaps", [])
     except Exception:
         return []
@@ -81,17 +78,32 @@ List at most 2 gaps. Be specific.""",
 async def synthesize_stream(memory: SessionMemory) -> AsyncGenerator[str, None]:
     """
     Stream the final answer. Yields text chunks as they are generated.
+    Supports multi-pass synthesis for large source sets.
     """
     client = get_client()
+    summaries = memory.summaries
 
-    # Build the source context block
-    source_block = memory.combined_summary_text()
-    safe_sources = truncate_to_tokens(source_block, MAX_CONTEXT_TOKENS - 500)
+    if len(summaries) > 4:
+        # Step 4: Chunked Synthesis
+        # Compress sources in chunks of 4
+        compressed_chunks = []
+        for i in range(0, len(summaries), 4):
+            chunk = summaries[i:i+4]
+            chunk_text = "\n\n".join(f"[{s.index}] {s.title}:\n{s.summary}" for s in chunk)
+            
+            messages = [
+                LLMMessage(role="system", content="Compress the following research findings into a concise summary, preserving all citations [N]."),
+                LLMMessage(role="user", content=f"Goal: {memory.goal}\n\nFindings:\n{chunk_text}"),
+            ]
+            compressed = await client.complete(messages, tier=ModelTier.FAST, max_tokens=600)
+            compressed_chunks.append(compressed)
+        
+        source_block = "\n\n".join(compressed_chunks)
+    else:
+        source_block = memory.combined_summary_text()
 
-    citation_lines = "\n".join(
-        f"[{c['index']}] {c['title']} — {c['url']}"
-        for c in memory.citation_list()
-    )
+    safe_sources = truncate_to_tokens(source_block, MAX_CONTEXT_TOKENS - 1000)
+    citation_lines = "\n".join(f"[{c['index']}] {c['title']} — {c['url']}" for c in memory.citation_list())
 
     user_content = (
         f"Research goal: {memory.goal}\n\n"
@@ -105,7 +117,7 @@ async def synthesize_stream(memory: SessionMemory) -> AsyncGenerator[str, None]:
         LLMMessage(role="user", content=user_content),
     ]
 
-    async for chunk in client.stream(messages, max_tokens=1200, temperature=0.2):
+    async for chunk in client.stream(messages, tier=ModelTier.SMART, max_tokens=1200, temperature=0.2):
         yield chunk
 
 
@@ -114,43 +126,36 @@ async def evaluate_and_refine(goal: str, draft: str, memory: SessionMemory) -> s
     Self-reflection step: The Critic reviews the draft and refines it.
     """
     client = get_client()
-    
-    # Provide the critic with the draft and the context
     source_block = memory.combined_summary_text()
     safe_sources = truncate_to_tokens(source_block, 3000)
 
     messages = [
         LLMMessage(role="system", content="""You are a senior research critic.
-Your goal is to ensure the research answer is 100% accurate, fully addresses the goal, and is perfectly cited.
-Review the provided draft. Check for:
-1. Hallucinations (facts not in sources)
-2. Missing information from the goal
-3. Proper citation format [N]
-If changes are needed, provide the full, corrected answer. If it's perfect, return the original draft."""),
+Review the provided draft. Check for hallucinations, missing info, and proper [N] citations.
+Provide the full, corrected answer if needed, otherwise return the original draft."""),
         LLMMessage(role="user", content=f"Research Goal: {goal}\n\nSources:\n{safe_sources}\n\nDraft Answer:\n{draft}"),
     ]
     
-    refined = await client.complete(messages, max_tokens=1500, temperature=0.1)
+    refined = await client.complete(messages, tier=ModelTier.SMART, max_tokens=1500, temperature=0.1)
     return refined.strip()
 
 
 async def evaluate_links(goal: str, gaps: list[str], links: list[str]) -> list[str]:
     """
-    Asks the LLM to identify links that are likely to answer remaining gaps.
+    Identify links that are likely to answer remaining gaps.
     """
     if not links or not gaps:
         return []
 
     client = get_client()
     messages = [
-        LLMMessage(role="system", content="""You are a web navigation specialist.
-Given a research goal, a list of current knowledge gaps, and a list of links found on a page, identify the 2 most promising URLs to follow.
-Only return the raw URLs, one per line. Do not include any explanation."""),
-        LLMMessage(role="user", content=f"Goal: {goal}\n\nGaps: {', '.join(gaps)}\n\nLinks found:\n" + "\n".join(links[:50])),
+        LLMMessage(role="system", content="""Identify the 2 most promising URLs to follow to answer the gaps.
+Only return the raw URLs, one per line."""),
+        LLMMessage(role="user", content=f"Goal: {goal}\n\nGaps: {', '.join(gaps)}\n\nLinks:\n" + "\n".join(links[:50])),
     ]
     
     try:
-        result = await client.complete(messages, max_tokens=200, temperature=0.0)
+        result = await client.complete(messages, tier=ModelTier.FAST, max_tokens=200, temperature=0.0)
         promising = [line.strip() for line in result.split("\n") if line.strip().startswith("http")]
         return promising[:2]
     except Exception:

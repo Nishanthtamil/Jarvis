@@ -80,6 +80,53 @@ async def query_vector_store(session_id: str, query: str, n_results: int = 5) ->
     except Exception:
         return []
 
+class EpisodicMemory:
+    async def store_session(self, session_id: str, goal: str, answer: str) -> None:
+        """Index the final answer for future cross-session retrieval."""
+        client = get_chroma_client()
+        collection = client.get_or_create_collection(
+            name="episodic",
+            embedding_function=default_ef
+        )
+        
+        # We index the full answer as a single "memory" (or chunk it if very long)
+        # For simplicity, just one doc per session here.
+        collection.add(
+            documents=[f"Goal: {goal}\n\nAnswer: {answer}"],
+            ids=[session_id],
+            metadatas=[{"session_id": session_id, "goal": goal, "type": "research_result"}]
+        )
+
+    async def search(self, goal: str, n: int = 3) -> list[dict]:
+        client = get_chroma_client()
+        try:
+            # We'll use a single 'episodic' collection for cross-session memory
+            collection = client.get_or_create_collection(
+                name="episodic",
+                embedding_function=default_ef
+            )
+            if collection.count() == 0:
+                return []
+            
+            results = collection.query(
+                query_texts=[goal],
+                n_results=n
+            )
+            
+            formatted = []
+            if results['documents']:
+                for i in range(len(results['documents'][0])):
+                    formatted.append({
+                        "content": results['documents'][0][i],
+                        "metadata": results['metadatas'][0][i] if results['metadatas'] else {},
+                        "distance": results['distances'][0][i] if results['distances'] else 0
+                    })
+            return formatted
+        except Exception:
+            return []
+        
+episodic_memory = EpisodicMemory()
+
 def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
     """Split text into overlapping chunks of approx. chunk_size characters."""
     if not text:

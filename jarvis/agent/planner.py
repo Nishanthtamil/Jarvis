@@ -10,7 +10,7 @@ import json
 
 from pydantic import BaseModel, ValidationError
 
-from llm.client import get_client, LLMMessage
+from llm.client import get_client, LLMMessage, ModelTier
 
 PLANNER_SYSTEM = """You are a research planning assistant.
 Given a research goal, produce a JSON plan with 2-4 search subtasks.
@@ -51,7 +51,7 @@ async def plan(goal: str) -> Plan:
 
     for attempt in range(3):
         try:
-            data = await client.complete_json(messages, max_tokens=600)
+            data = await client.complete_json(messages, tier=ModelTier.SMART, max_tokens=600)
             return Plan.model_validate(data)
         except (ValidationError, KeyError, json.JSONDecodeError) as e:
             if attempt == 2:

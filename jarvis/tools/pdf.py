@@ -62,5 +62,8 @@ def _extract_from_bytes(source: str, pdf_bytes: bytes) -> dict:
     }
 
 
+from urllib.parse import urlparse
+
 def is_pdf_url(url: str) -> bool:
-    return url.lower().endswith(".pdf") or "pdf" in url.lower()
+    path = urlparse(url).path.lower()
+    return path.endswith('.pdf')

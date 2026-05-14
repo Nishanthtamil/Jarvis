@@ -45,16 +45,25 @@ def _event(type_: str, **kwargs) -> dict:
     return {"type": type_, **kwargs}
 
 
-async def run_research(goal: str) -> AsyncGenerator[dict, None]:
+async def run_research(goal: str, session_id: str = None) -> AsyncGenerator[dict, None]:
     """
     Main entry point. Yields progress events as dicts.
     Caller (FastAPI) converts these to SSE JSON lines.
     """
-    session_id = str(uuid.uuid4())
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        await create_session(session_id, goal)
+    
     memory = SessionMemory(goal=goal, session_id=session_id)
-    await create_session(session_id, goal)
 
     yield _event("status", message=f"Starting research session {session_id[:8]}…")
+
+    session_token_budget = int(os.getenv("SESSION_TOKEN_BUDGET", "50000"))
+    session_tokens_used = 0
+
+    past = await episodic_memory.search(goal, n=3)
+    if past:
+        yield _event("status", message=f"Found {len(past)} related past sessions")
 
     # ── PLAN ──────────────────────────────────────────────────────────────────
     try:
@@ -142,6 +151,13 @@ async def run_research(goal: str) -> AsyncGenerator[dict, None]:
             yield _event("fetch", url=fr["url"], ok=ok)
 
             if ok and fr.get("markdown"):
+                session_tokens_used += fr.get("token_count", 0)
+                if session_tokens_used > session_token_budget:
+                    yield _event("error", message=f"Token budget exceeded ({session_tokens_used} > {session_token_budget}). Stopping fetch.")
+                    pending_queries.clear()
+                    pending_urls.clear()
+                    break
+
                 # Log source to DB
                 source_id = await log_source(
                     session_id,
@@ -227,6 +243,10 @@ async def run_research(goal: str) -> AsyncGenerator[dict, None]:
     refined_answer = await evaluate_and_refine(goal, final_answer, memory)
     
     await update_session_answer(session_id, refined_answer)
+
+    # ── STORE MEMORY ──────────────────────────────────────────────────────────
+    await episodic_memory.store_session(session_id, goal, refined_answer)
+    await evaluate_and_store_user_facts(session_id, goal, refined_answer)
 
     yield _event(
         "done",
