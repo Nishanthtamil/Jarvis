@@ -31,26 +31,44 @@ async def add_to_vector_store(session_id: str, url: str, text: str, metadata: di
     """
     Chunks text and adds it to the session-specific collection in ChromaDB.
     """
+    await add_documents_to_collection(
+        collection_name=f"session_{session_id.replace('-', '_')}",
+        documents=_chunk_text(text),
+        metadatas=[{**(metadata or {}), "url": url, "session_id": session_id}]
+    )
+
+async def add_documents_to_collection(collection_name: str, documents: list[str], metadatas: list[dict] = None):
+    """
+    Add a list of document chunks to a specified collection.
+    If metadatas is a single dict, it's applied to all chunks.
+    """
     client = get_chroma_client()
     collection = client.get_or_create_collection(
-        name=f"session_{session_id.replace('-', '_')}",
+        name=collection_name,
         embedding_function=default_ef
     )
     
-    # Simple semantic chunking (by paragraph or fixed size)
-    chunks = _chunk_text(text, chunk_size=500, overlap=50)
+    ids = [str(uuid.uuid4()) for _ in documents]
     
-    ids = [str(uuid.uuid4()) for _ in chunks]
-    metadatas = [
-        {**(metadata or {}), "url": url, "session_id": session_id} 
-        for _ in chunks
-    ]
-    
+    if metadatas and len(metadatas) == 1 and len(documents) > 1:
+        final_metadatas = [metadatas[0] for _ in documents]
+    else:
+        final_metadatas = metadatas
+        
     collection.add(
-        documents=chunks,
+        documents=documents,
         ids=ids,
-        metadatas=metadatas
+        metadatas=final_metadatas
     )
+
+async def delete_collection_items(collection_name: str, filter: dict):
+    """Delete items from a collection based on metadata filter."""
+    client = get_chroma_client()
+    try:
+        collection = client.get_collection(name=collection_name, embedding_function=default_ef)
+        collection.delete(where=filter)
+    except Exception:
+        pass
 
 async def query_vector_store(session_id: str, query: str, n_results: int = 5) -> list[dict]:
     """

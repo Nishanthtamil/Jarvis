@@ -24,13 +24,15 @@ import re
 from agent.memory import SessionMemory, SourceSummary
 from agent.planner import plan
 from agent.synthesizer import extract_from_source, check_gaps, synthesize_stream, evaluate_and_refine, evaluate_links
-from store.vector import add_to_vector_store
+from store.vector import add_to_vector_store, episodic_memory
+from memory.semantic import evaluate_and_store_user_facts
 from store.db import (
     create_session,
     log_search,
     log_source,
     log_summary,
     update_session_answer,
+    get_recent_user_facts,
 )
 from tools.search import search
 from tools.crawl import fetch_many
@@ -58,6 +60,12 @@ async def run_research(goal: str, session_id: str = None) -> AsyncGenerator[dict
 
     yield _event("status", message=f"Starting research session {session_id[:8]}…")
 
+    facts = await get_recent_user_facts(limit=10)
+    goal_for_planner = goal
+    if facts:
+        context_str = "; ".join(f["content"] for f in facts)
+        goal_for_planner = f"[User context: {context_str}]\n\nGoal: {goal}"
+
     session_token_budget = int(os.getenv("SESSION_TOKEN_BUDGET", "50000"))
     session_tokens_used = 0
 
@@ -67,7 +75,7 @@ async def run_research(goal: str, session_id: str = None) -> AsyncGenerator[dict
 
     # ── PLAN ──────────────────────────────────────────────────────────────────
     try:
-        research_plan = await plan(goal)
+        research_plan = await plan(goal_for_planner)
         yield _event("status", message=f"Plan ready: {len(research_plan.subtasks)} subtasks")
     except Exception as e:
         yield _event("error", message=f"Planning failed: {e}")
@@ -78,151 +86,156 @@ async def run_research(goal: str, session_id: str = None) -> AsyncGenerator[dict
     pending_urls = []
 
     for iteration in range(MAX_REACT_ITERATIONS):
-        memory.iteration = iteration
+        try:
+            memory.iteration = iteration
 
-        if not pending_queries and not pending_urls:
-            break
-
-        # ── DISPATCH ──────────────────────────────────────────────────────────
-        candidate_urls = []
-        query = None
-
-        if pending_urls:
-            candidate_urls = [pending_urls.pop(0)]
-            yield _event("status", message=f"[{iteration+1}] Deep Dive: {candidate_urls[0]}")
-        else:
-            query = pending_queries.pop(0)
-            if memory.is_seen(f"query:{query}"):
-                continue
-            memory.add_query(query)
-            yield _event("status", message=f"[{iteration+1}] Searching: {query}")
-
-        # ── SEARCH ────────────────────────────────────────────────────────────
-        if query:
-            try:
-                results = await search(query)
-                await log_search(session_id, query, results)
-                yield _event("search", query=query, count=len(results))
-                candidate_urls = [
-                    r["url"] for r in results
-                    if not memory.is_seen(r["url"])
-                ][:MAX_SOURCES_PER_ROUND]
-            except Exception as e:
-                yield _event("error", message=f"Search failed: {e}")
-                continue
-
-        for url in candidate_urls:
-            memory.add_url(url)
-
-        if not candidate_urls:
-            if query:
-                yield _event("status", message="No new URLs found for this query")
-            continue
-
-        # ── FETCH ─────────────────────────────────────────────────────────────
-        # PDF URLs go to the PDF extractor; others go to Crawl4AI
-        pdf_urls = [u for u in candidate_urls if is_pdf_url(u)]
-        web_urls = [u for u in candidate_urls if not is_pdf_url(u)]
-
-        fetched = []
-
-        if web_urls:
-            web_results = await fetch_many(web_urls)
-            fetched.extend(web_results)
-
-            # Retry failed URLs with Playwright
-            failed_urls = [u for u in web_urls if u not in {r["url"] for r in web_results}]
-            for fu in failed_urls[:2]:  # max 2 browser retries per round
-                br = await fetch_with_browser(fu)
-                if br["ok"]:
-                    fetched.append(br)
-
-        for pu in pdf_urls:
-            pr = await extract_pdf_url(pu)
-            if pr["ok"]:
-                fetched.append(pr)
-
-        # ── PARALLEL EXTRACTION ───────────────────────────────────────────────
-        extraction_tasks = []
-        valid_results = []
-        
-        for fr in fetched:
-            ok = fr.get("ok", False)
-            yield _event("fetch", url=fr["url"], ok=ok)
-
-            if ok and fr.get("markdown"):
-                session_tokens_used += fr.get("token_count", 0)
-                if session_tokens_used > session_token_budget:
-                    yield _event("error", message=f"Token budget exceeded ({session_tokens_used} > {session_token_budget}). Stopping fetch.")
-                    pending_queries.clear()
-                    pending_urls.clear()
-                    break
-
-                # Log source to DB
-                source_id = await log_source(
-                    session_id,
-                    fr["url"],
-                    fr.get("title", ""),
-                    fr.get("domain", ""),
-                    fr.get("token_count", 0),
-                    True,
-                )
-                valid_results.append((fr, source_id))
-                extraction_tasks.append(extract_from_source(goal, fr["markdown"], fr["url"]))
-                # Index in vector store for RAG
-                await add_to_vector_store(session_id, fr["url"], fr["markdown"], {
-                    "title": fr.get("title", ""),
-                    "domain": fr.get("domain", "")
-                })
-
-                # ── LINK EXTRACTION (Recursive) ───────────────────────────────
-                if iteration < MAX_REACT_ITERATIONS - 3:
-                    found_links = re.findall(r'\[.*?\]\((https?://.*?)\)', fr["markdown"])
-                    if found_links:
-                        gaps = await check_gaps(goal, memory)
-                        if gaps:
-                            promising = await evaluate_links(goal, gaps, found_links)
-                            for p_url in promising:
-                                if not memory.is_seen(p_url):
-                                    pending_urls.append(p_url)
-
-        if extraction_tasks:
-            summaries = await asyncio.gather(*extraction_tasks, return_exceptions=True)
-            
-            for (fr, source_id), summary_text in zip(valid_results, summaries):
-                if isinstance(summary_text, Exception):
-                    yield _event("status", message=f"Extraction error for {fr['url']}: {summary_text}")
-                    continue
-
-                await log_summary(session_id, source_id, summary_text)
-
-                s = SourceSummary(
-                    url=fr["url"],
-                    title=fr.get("title", ""),
-                    domain=fr.get("domain", ""),
-                    summary=summary_text,
-                    token_count=fr.get("token_count", 0),
-                )
-                memory.add_summary(s)
-                yield _event("summary", url=fr["url"], text=summary_text[:200] + "…")
-
-        # ── GAP CHECK ─────────────────────────────────────────────────────────
-        if memory.has_enough_sources() and iteration < MAX_REACT_ITERATIONS - 2:
-            gaps = await check_gaps(goal, memory)
-            memory.set_gaps(gaps)
-
-            if gaps:
-                yield _event("gap", gaps=gaps)
-                # Convert gaps into new search queries for the next iterations
-                for gap in gaps[:2]:
-                    pending_queries.insert(0, gap)
-            else:
-                # No gaps — exit the loop early
-                yield _event("status", message="No gaps detected. Moving to synthesis.")
+            if not pending_queries and not pending_urls:
                 break
 
-        # Small delay between iterations to avoid hammering services
-        await asyncio.sleep(0.5)
+            # ── DISPATCH ──────────────────────────────────────────────────────────
+            candidate_urls = []
+            query = None
+
+            if pending_urls:
+                candidate_urls = [pending_urls.pop(0)]
+                yield _event("status", message=f"[{iteration+1}] Deep Dive: {candidate_urls[0]}")
+            else:
+                query = pending_queries.pop(0)
+                if memory.is_seen(f"query:{query}"):
+                    continue
+                memory.add_query(query)
+                yield _event("status", message=f"[{iteration+1}] Searching: {query}")
+
+            # ── SEARCH ────────────────────────────────────────────────────────────
+            if query:
+                try:
+                    results = await search(query)
+                    await log_search(session_id, query, results)
+                    yield _event("search", query=query, count=len(results))
+                    candidate_urls = [
+                        r["url"] for r in results
+                        if not memory.is_seen(r["url"])
+                    ][:MAX_SOURCES_PER_ROUND]
+                except Exception as e:
+                    yield _event("error", message=f"Search failed: {e}")
+                    continue
+
+            for url in candidate_urls:
+                memory.add_url(url)
+
+            if not candidate_urls:
+                if query:
+                    yield _event("status", message="No new URLs found for this query")
+                continue
+
+            # ── FETCH ─────────────────────────────────────────────────────────────
+            # PDF URLs go to the PDF extractor; others go to Crawl4AI
+            pdf_urls = [u for u in candidate_urls if is_pdf_url(u)]
+            web_urls = [u for u in candidate_urls if not is_pdf_url(u)]
+
+            fetched = []
+
+            if web_urls:
+                web_results = await fetch_many(web_urls)
+                fetched.extend(web_results)
+
+                # Retry failed URLs with Playwright
+                failed_urls = [u for u in web_urls if u not in {r["url"] for r in web_results}]
+                for fu in failed_urls[:2]:  # max 2 browser retries per round
+                    br = await fetch_with_browser(fu)
+                    if br["ok"]:
+                        fetched.append(br)
+
+            for pu in pdf_urls:
+                pr = await extract_pdf_url(pu)
+                if pr["ok"]:
+                    fetched.append(pr)
+
+            # ── PARALLEL EXTRACTION ───────────────────────────────────────────────
+            extraction_tasks = []
+            valid_results = []
+            
+            for fr in fetched:
+                ok = fr.get("ok", False)
+                yield _event("fetch", url=fr["url"], ok=ok)
+
+                if ok and fr.get("markdown"):
+                    session_tokens_used += fr.get("token_count", 0)
+                    if session_tokens_used > session_token_budget:
+                        yield _event("error", message=f"Token budget exceeded ({session_tokens_used} > {session_token_budget}). Stopping fetch.")
+                        pending_queries.clear()
+                        pending_urls.clear()
+                        break
+
+                    # Log source to DB
+                    source_id = await log_source(
+                        session_id,
+                        fr["url"],
+                        fr.get("title", ""),
+                        fr.get("domain", ""),
+                        fr.get("token_count", 0),
+                        True,
+                    )
+                    valid_results.append((fr, source_id))
+                    extraction_tasks.append(extract_from_source(goal, fr["markdown"], fr["url"]))
+                    # Index in vector store for RAG
+                    await add_to_vector_store(session_id, fr["url"], fr["markdown"], {
+                        "title": fr.get("title", ""),
+                        "domain": fr.get("domain", "")
+                    })
+
+                    # ── LINK EXTRACTION (Recursive) ───────────────────────────────
+                    if iteration < MAX_REACT_ITERATIONS - 3:
+                        found_links = re.findall(r'\[.*?\]\((https?://.*?)\)', fr["markdown"])
+                        if found_links:
+                            gaps = await check_gaps(goal, memory)
+                            if gaps:
+                                promising = await evaluate_links(goal, gaps, found_links)
+                                for p_url in promising:
+                                    if not memory.is_seen(p_url):
+                                        pending_urls.append(p_url)
+
+            if extraction_tasks:
+                summaries = await asyncio.gather(*extraction_tasks, return_exceptions=True)
+                
+                for i, ((fr, source_id), summary_text) in enumerate(zip(valid_results, summaries)):
+                    if isinstance(summary_text, Exception):
+                        yield _event("status", message=f"Extraction error for {fr['url']}: {summary_text}")
+                        continue
+
+                    await log_summary(session_id, source_id, summary_text)
+
+                    s = SourceSummary(
+                        url=fr["url"],
+                        title=fr.get("title", ""),
+                        domain=fr.get("domain", ""),
+                        summary=summary_text,
+                        token_count=fr.get("token_count", 0),
+                        index=i + 1,
+                    )
+                    memory.add_summary(s)
+                    yield _event("summary", url=fr["url"], text=summary_text[:200] + "…")
+
+            # ── GAP CHECK ─────────────────────────────────────────────────────────
+            if memory.has_enough_sources() and iteration < MAX_REACT_ITERATIONS - 2:
+                gaps = await check_gaps(goal, memory)
+                memory.set_gaps(gaps)
+
+                if gaps:
+                    yield _event("gap", gaps=gaps)
+                    # Convert gaps into new search queries for the next iterations
+                    for gap in gaps[:2]:
+                        pending_queries.insert(0, gap)
+                else:
+                    # No gaps — exit the loop early
+                    yield _event("status", message="No gaps detected. Moving to synthesis.")
+                    break
+
+            # Small delay between iterations to avoid hammering services
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            yield _event("status", message=f"Iteration {iteration+1} error: {e}. Continuing...")
+            continue
 
     # ── SYNTHESIZE ────────────────────────────────────────────────────────────
     if not memory.summaries:

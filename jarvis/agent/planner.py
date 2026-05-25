@@ -8,32 +8,44 @@ from __future__ import annotations
 
 import json
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 from llm.client import get_client, LLMMessage, ModelTier
+from tools.registry import list_tools, TOOL_REGISTRY
 
-PLANNER_SYSTEM = """You are a research planning assistant.
+def get_planner_system() -> str:
+    tools_block = "\n".join(f"- {t['name']}: {t['description']}" for t in list_tools())
+    return f"""You are a research planning assistant.
 Given a research goal, produce a JSON plan with 2-4 search subtasks.
 Each subtask targets a distinct angle of the goal.
 Avoid duplicate or overly similar queries.
 
 Respond ONLY with a JSON object in this exact format:
-{
+{{
   "subtasks": [
-    {"query": "...", "tool": "search", "rationale": "..."},
+    {{"query": "...", "tool": "search_web", "rationale": "..."}},
     ...
   ],
   "expected_answer_type": "factual | comparative | explanatory | investigative"
-}
+}}
 
-tool must be one of: search, pdf, browser
+Available tools:
+{tools_block}
+
 Keep queries short (5-10 words), specific, and search-engine-friendly."""
 
 
 class Subtask(BaseModel):
     query: str
-    tool: str  # "search" | "pdf" | "browser"
+    tool: str
     rationale: str
+
+    @field_validator("tool")
+    @classmethod
+    def validate_tool(cls, v: str) -> str:
+        if v not in TOOL_REGISTRY:
+            raise ValueError(f"Tool '{v}' must be one of {list(TOOL_REGISTRY.keys())}")
+        return v
 
 
 class Plan(BaseModel):
@@ -45,7 +57,7 @@ async def plan(goal: str) -> Plan:
     """Generate a research plan for the given goal."""
     client = get_client()
     messages = [
-        LLMMessage(role="system", content=PLANNER_SYSTEM),
+        LLMMessage(role="system", content=get_planner_system()),
         LLMMessage(role="user", content=f"Research goal: {goal}"),
     ]
 

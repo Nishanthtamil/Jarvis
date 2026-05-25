@@ -5,6 +5,7 @@ Speech-to-Text (STT) using Faster-Whisper.
 from __future__ import annotations
 
 import logging
+import numpy as np
 from faster_whisper import WhisperModel
 
 logger = logging.getLogger(__name__)

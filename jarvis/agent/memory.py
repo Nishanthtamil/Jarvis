@@ -15,6 +15,7 @@ class SourceSummary:
     domain: str
     summary: str
     token_count: int
+    index: int = 0
 
 
 @dataclass

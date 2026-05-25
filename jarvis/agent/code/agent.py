@@ -7,10 +7,12 @@ from __future__ import annotations
 import re
 from typing import AsyncGenerator
 
+import os
 from llm.client import get_client, LLMMessage, ModelTier
 from agent.code.sandbox import execute_code
 
-CODE_AGENT_PROMPT = open("jarvis/llm/prompts/code_agent.md").read()
+PROMPT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "llm", "prompts", "code_agent.md")
+CODE_AGENT_PROMPT = open(PROMPT_PATH).read()
 
 async def run_code_agent(goal: str, context: str = "") -> AsyncGenerator[dict, None]:
     """

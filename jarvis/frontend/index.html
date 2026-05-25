@@ -237,6 +237,18 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
     ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+    #file-chip {
+      background: #27272a;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      margin: 4px;
+      display: none;
+      align-items: center;
+      gap: 4px;
+      color: var(--text);
+    }
   </style>
 </head>
 <body>
@@ -265,7 +277,14 @@
 
     <!-- Input Area -->
     <div class="input-wrapper">
+      <div id="file-chip">
+        <span>📄</span> <span id="file-name"></span>
+      </div>
       <div class="input-box">
+        <button class="action-btn" id="attach-btn" title="Attach File">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.51a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <input type="file" id="file-input" style="display: none;" accept=".pdf,.txt,.md,.docx">
         <button class="action-btn" id="mic-btn" title="Voice Input">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
         </button>
@@ -301,6 +320,10 @@
     const chatInput = document.getElementById('chat-input');
     const sendBtn = document.getElementById('send-btn');
     const micBtn = document.getElementById('mic-btn');
+    const attachBtn = document.getElementById('attach-btn');
+    const fileInput = document.getElementById('file-input');
+    const fileChip = document.getElementById('file-chip');
+    const fileNameDisplay = document.getElementById('file-name');
     const historyList = document.getElementById('history-list');
 
     // Auto-resize textarea
@@ -317,7 +340,35 @@
       }
     });
 
-    sendBtn.addEventListener('click', sendMessage);
+    sendBtn.addEventListener('click', () => sendMessage());
+
+    attachBtn.addEventListener('click', () => fileInput.click());
+
+    fileInput.addEventListener('change', async () => {
+      if (fileInput.files.length > 0) {
+        const file = fileInput.files[0];
+        fileNameDisplay.innerText = file.name + " — uploading...";
+        fileChip.style.display = 'flex';
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        try {
+            const resp = await fetch('/files/upload', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await resp.json();
+            if (data.file_id) {
+                fileNameDisplay.innerText = `${file.name} — indexed`;
+            } else {
+                fileNameDisplay.innerText = `${file.name} — failed`;
+            }
+        } catch (err) {
+            fileNameDisplay.innerText = `${file.name} — error`;
+        }
+      }
+    });
 
     async function sendMessage(text = null) {
       const content = text || chatInput.value.trim();
@@ -326,6 +377,8 @@
       if (!text) {
         chatInput.value = '';
         chatInput.style.height = 'auto';
+        fileChip.style.display = 'none';
+        fileInput.value = '';
       }
 
       // Add user message to UI
@@ -371,6 +424,18 @@
               chatContainer.scrollTop = chatContainer.scrollHeight;
             } else if (event.type === "done") {
               if (event.session_id) currentSessionId = event.session_id;
+              
+              // Add download button to footer
+              const footer = msgDiv.querySelector('.message-footer');
+              if (footer) {
+                  const downloadBtn = document.createElement('button');
+                  downloadBtn.className = 'action-btn';
+                  downloadBtn.title = "Download Report";
+                  downloadBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+                  downloadBtn.onclick = () => window.location.href = `/export/${currentSessionId}`;
+                  footer.appendChild(downloadBtn);
+              }
+              
               loadHistory(); // Refresh sidebar
             } else if (event.type === "error") {
               addThought(thoughtContainer, { type: 'error', message: event.message });
@@ -385,10 +450,30 @@
     function addMessage(role, content) {
       const msgDiv = document.createElement('div');
       msgDiv.className = `message ${role}`;
-      msgDiv.innerHTML = `<div class="bubble prose">${marked.parse(content)}</div>`;
+      
+      let html = `<div class="bubble prose">${marked.parse(content)}</div>`;
+      if (role === 'assistant') {
+          html += `
+            <div class="message-footer" style="display: flex; gap: 10px; margin-top: 4px;">
+              <button class="action-btn" onclick="copyToClipboard(this)" title="Copy to clipboard">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </div>
+          `;
+      }
+      
+      msgDiv.innerHTML = html;
       chatContainer.appendChild(msgDiv);
       chatContainer.scrollTop = chatContainer.scrollHeight;
       return msgDiv;
+    }
+
+    function copyToClipboard(btn) {
+        const text = btn.closest('.message').querySelector('.bubble').innerText;
+        navigator.clipboard.writeText(text);
+        const originalIcon = btn.innerHTML;
+        btn.innerHTML = '✓';
+        setTimeout(() => btn.innerHTML = originalIcon, 2000);
     }
 
     function createThoughtContainer(parent) {
@@ -448,8 +533,6 @@
           if (data.text) {
             chatInput.value = data.text;
             chatInput.focus();
-            // Automatically send? 
-            // sendMessage(data.text);
           }
         };
 
@@ -471,10 +554,20 @@
       `).join("");
     }
 
-    function selectSession(id, goal) {
+    async function selectSession(id, goal) {
       currentSessionId = id;
-      // Ideally load session messages here. For now just clear and set context.
-      chatContainer.innerHTML = `<div class="message assistant"><div class="bubble prose">Context switched to: <strong>${goal}</strong>. How can I continue?</div></div>`;
+      chatContainer.innerHTML = '';
+      
+      const resp = await fetch(`/session/${id}/messages`);
+      const data = await resp.json();
+      
+      if (data.messages && data.messages.length > 0) {
+          data.messages.forEach(msg => {
+              addMessage(msg.role, msg.content);
+          });
+      } else {
+          chatContainer.innerHTML = `<div class="message assistant"><div class="bubble prose">Context switched to: <strong>${goal}</strong>. How can I continue?</div></div>`;
+      }
       loadHistory();
     }
 

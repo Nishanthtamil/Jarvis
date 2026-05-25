@@ -87,9 +87,9 @@ async def synthesize_stream(memory: SessionMemory) -> AsyncGenerator[str, None]:
         # Step 4: Chunked Synthesis
         # Compress sources in chunks of 4
         compressed_chunks = []
-        for i in range(0, len(summaries), 4):
-            chunk = summaries[i:i+4]
-            chunk_text = "\n\n".join(f"[{s.index}] {s.title}:\n{s.summary}" for s in chunk)
+        for start in range(0, len(summaries), 4):
+            chunk = summaries[start:start+4]
+            chunk_text = "\n\n".join(f"[{start + i + 1}] {s.title}:\n{s.summary}" for i, s in enumerate(chunk))
             
             messages = [
                 LLMMessage(role="system", content="Compress the following research findings into a concise summary, preserving all citations [N]."),

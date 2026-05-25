@@ -12,6 +12,9 @@ import re
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from tools.bm25_rerank import rerank
+from tools.rerank import cross_encode_rerank
+
 SEARXNG_BASE_URL = os.getenv("SEARXNG_BASE_URL", "http://localhost:8888")
 SEARXNG_MAX_RESULTS = int(os.getenv("SEARXNG_MAX_RESULTS", "10"))
 
@@ -85,4 +88,5 @@ async def search(query: str, max_results: int = SEARXNG_MAX_RESULTS) -> list[dic
         })
 
     scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:max_results]
+    results = rerank(query, scored, top_k=max_results * 2)
+    return cross_encode_rerank(query, results, top_k=max_results)

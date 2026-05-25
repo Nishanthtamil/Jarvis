@@ -25,6 +25,7 @@ OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120"))
 # Default models for tiers
 MODEL_FAST = os.getenv("MODEL_FAST", "gemma3:4b-it-q4_K_M")
 MODEL_SMART = os.getenv("MODEL_SMART", "qwen2.5:14b-instruct-q4")
+MODEL_VISION = os.getenv("MODEL_VISION", "llava:7b-v1.6-mistral-q4_K_M")
 
 _enc = tiktoken.get_encoding("cl100k_base")
 
@@ -32,6 +33,7 @@ _enc = tiktoken.get_encoding("cl100k_base")
 class ModelTier(str, Enum):
     FAST = "fast"    # Gemma 3 4B - extraction, classification, small summaries
     SMART = "smart"  # Qwen 2.5 14B - planning, synthesis, complex reasoning
+    VISION = "vision"
 
 
 def count_tokens(text: str) -> int:
@@ -62,6 +64,7 @@ class LLMPool:
         self.models = {
             ModelTier.FAST: MODEL_FAST,
             ModelTier.SMART: MODEL_SMART,
+            ModelTier.VISION: MODEL_VISION,
         }
 
     async def close(self):
@@ -153,6 +156,26 @@ class LLMPool:
             ]
             raw2 = await self.complete(fix_messages, tier=tier, max_tokens=max_tokens, json_mode=True)
             return json.loads(raw2)
+
+    async def complete_vision(self, image_b64: str, prompt: str) -> str:
+        """
+        Sends to Ollama /api/chat with image support.
+        """
+        payload = {
+            "model": self.models[ModelTier.VISION],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": [image_b64]
+                }
+            ],
+            "stream": False
+        }
+        resp = await self._http.post(f"{self.base_url}/api/chat", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["message"]["content"]
 
 
 _pool: LLMPool | None = None

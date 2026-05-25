@@ -18,7 +18,8 @@ class VAD:
                 repo_or_dir='snakers4/silero-vad',
                 model='silero_vad',
                 force_reload=False,
-                onnx=True
+                onnx=True,
+                trust_repo=True
             )
             (self.get_speech_timestamps, _, self.read_audio, _, _) = utils
         except Exception as e:

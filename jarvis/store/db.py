@@ -102,6 +102,15 @@ async def init_db(db_path: str = DB_PATH):
         CREATE INDEX IF NOT EXISTS idx_sources_url ON sources(url);
         CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+        CREATE INDEX IF NOT EXISTS idx_user_facts_category ON user_facts(category);
+
+        CREATE TABLE IF NOT EXISTS uploaded_files (
+            id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            token_count INTEGER,
+            chroma_collection TEXT NOT NULL,
+            uploaded_at REAL NOT NULL
+        );
         """)
         await db.commit()
 
@@ -213,6 +222,17 @@ async def get_user_facts(category: str = None, db_path: str = DB_PATH) -> list[d
         return [dict(r) for r in rows]
 
 
+async def get_recent_user_facts(limit: int = 10, db_path: str = DB_PATH) -> list[dict]:
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM user_facts ORDER BY last_updated DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
 async def get_session_history(limit: int = 20, db_path: str = DB_PATH) -> list[dict]:
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
@@ -271,6 +291,15 @@ async def update_tracker_last_checked(tracker_id: str, db_path: str = DB_PATH) -
         await db.commit()
 
 
+async def update_tracker_config(tracker_id: str, config: dict, db_path: str = DB_PATH) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "UPDATE trackers SET config_json=? WHERE id=?",
+            (json.dumps(config), tracker_id),
+        )
+        await db.commit()
+
+
 async def log_alert(tracker_id: str, content: str, db_path: str = DB_PATH) -> str:
     import uuid
     alert_id = str(uuid.uuid4())
@@ -293,3 +322,26 @@ async def get_unread_alerts(db_path: str = DB_PATH) -> list[dict]:
         cursor = await db.execute("SELECT * FROM alerts WHERE read=0 ORDER BY created_at DESC")
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+async def add_uploaded_file(id: str, filename: str, token_count: int, chroma_collection: str, db_path: str = DB_PATH) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT INTO uploaded_files (id, filename, token_count, chroma_collection, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+            (id, filename, token_count, chroma_collection, time.time()),
+        )
+        await db.commit()
+
+
+async def list_uploaded_files(db_path: str = DB_PATH) -> list[dict]:
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM uploaded_files ORDER BY uploaded_at DESC")
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def delete_uploaded_file(id: str, db_path: str = DB_PATH) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("DELETE FROM uploaded_files WHERE id=?", (id,))
+        await db.commit()

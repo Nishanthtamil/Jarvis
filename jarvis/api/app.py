@@ -22,17 +22,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from pydantic import BaseModel
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
 from agent.orchestrator import run_research
 from agent.router import route_request, Intent
 from agent.code.agent import run_code_agent
 from agent.task.agent import run_task_agent
+from agent.vision.agent import run_vision_agent
 from agent.task.scheduler import start_scheduler
 from agent.proactive.engine import init_proactive_engine, set_alert_callback
 from voice.stt import STT
 from voice.tts import TTS
-from store.db import init_db, get_session_history, get_session_data, log_message, get_messages
+from voice.pipeline import VoicePipeline
+from store.db import init_db, get_session_history, get_session_data, log_message, get_messages, add_tracker
+from api.upload import router as upload_router
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Jarvis Research Agent", version="1.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.include_router(upload_router)
 
 # WebSocket connections
 class ConnectionManager:
@@ -54,6 +66,7 @@ class ConnectionManager:
                 pass
 
 manager = ConnectionManager()
+voice_pipeline = VoicePipeline()
 
 async def broadcast_alert(message: dict):
     await manager.broadcast(message)
@@ -96,6 +109,13 @@ class ResearchRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: str = None
+    image_b64: str = None
+
+
+class TrackerRequest(BaseModel):
+    type: str
+    config: dict
+    frequency: str
 
 
 @app.get("/health")
@@ -109,6 +129,14 @@ async def history():
     return {"sessions": sessions}
 
 
+@app.post("/trackers")
+async def add_new_tracker(req: TrackerRequest):
+    import uuid
+    tracker_id = str(uuid.uuid4())
+    await add_tracker(tracker_id, req.type, req.config, req.frequency)
+    return {"tracker_id": tracker_id}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
@@ -118,6 +146,18 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+
+@app.websocket("/ws/voice")
+async def websocket_voice(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            audio_data = await websocket.receive_bytes()
+            async for event in voice_pipeline.process_audio(audio_data):
+                await websocket.send_json(event)
+    except WebSocketDisconnect:
+        pass
 
 
 @app.get("/export/{session_id}")
@@ -181,8 +221,22 @@ async def text_to_speech(text: str):
     return {"error": "TTS failed"}
 
 
+@app.get("/session/{session_id}/messages")
+async def session_messages(session_id: str):
+    messages = await get_messages(session_id)
+    data = await get_session_data(session_id)
+    if not data:
+        return {"messages": messages, "goal": "", "status": ""}
+    return {
+        "messages": messages,
+        "goal": data["session"]["goal"],
+        "status": data["session"]["status"]
+    }
+
+
 @app.post("/chat")
-async def chat(req: ChatRequest):
+@limiter.limit("10/minute")
+async def chat(req: ChatRequest, request: Request):
     """
     Threaded chat endpoint. Dispatches to specialist agents based on intent.
     """
@@ -199,12 +253,14 @@ async def chat(req: ChatRequest):
     async def event_stream():
         # 1. Route the request
         history_msgs = await get_messages(session_id) if session_id else []
-        route = await route_request(message, history_msgs)
+        route = await route_request(message, history_msgs, has_image=(req.image_b64 is not None))
         
         yield f"data: {json.dumps({'type': 'status', 'message': f'Intent: {route.intent} ({route.rationale})'})}\n\n"
 
         # 2. Dispatch to the correct agent
-        if route.intent == Intent.RESEARCH:
+        if route.intent == Intent.VISION:
+            agent_gen = run_vision_agent(message, req.image_b64)
+        elif route.intent == Intent.RESEARCH:
             agent_gen = run_research(message, session_id=session_id)
         elif route.intent == Intent.CODE:
             agent_gen = run_code_agent(message)
@@ -239,7 +295,8 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/research")
-async def research(req: ResearchRequest):
+@limiter.limit("5/minute")
+async def research(req: ResearchRequest, request: Request):
     """
     SSE endpoint. Each event is a JSON line prefixed with 'data: '.
     The frontend reads these incrementally.
